@@ -1,0 +1,179 @@
+import mailbox
+import csv
+import email.utils
+from collections import Counter, defaultdict
+import os
+import sys
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+# Replace this with the actual name of your mbox file from the Takeout zip.
+# It is usually inside a folder called "Mail".
+MBOX_FILENAME = 'All mail Including Spam and Trash.mbox'
+
+# The output file name
+OUTPUT_CSV = 'my_services_list.csv'
+
+# Domains to ignore (optional). 
+# You can add 'gmail.com' if you don't want to see emails from other personal gmail users.
+IGNORE_DOMAINS = {
+    'gmail.com',
+    'googlemail.com',
+    'example.com'
+}
+
+def get_domain(email_addr):
+    """Extracts the domain part of an email address."""
+    try:
+        if '@' in email_addr:
+            return email_addr.split('@')[1].lower().strip()
+    except Exception:
+        pass
+    return None
+
+def get_recipients(message):
+    """Extracts unique recipient email addresses from To and Delivered-To headers."""
+    recipients = set()
+    
+    # Check 'To' header (often contains the original alias if forwarded)
+    to_headers = message.get_all('to', [])
+    for header in to_headers:
+        if header:
+            # getaddresses returns a list of (name, email) tuples
+            for _, addr in email.utils.getaddresses([header]):
+                if addr:
+                    recipients.add(addr.lower())
+
+    # Check 'Delivered-To' (useful for pinpointing the exact inbox if Bcc'd or forwarded)
+    delivered_to = message.get_all('delivered-to', [])
+    for header in delivered_to:
+        if header:
+            recipients.add(header.strip().lower())
+
+    return recipients
+
+def parse_mbox(mbox_path):
+    """Parses the mbox file and extracts service usage data."""
+    
+    if not os.path.exists(mbox_path):
+        print(f"Error: File '{mbox_path}' not found.")
+        print("Please ensure the script and the .mbox file are in the same directory,")
+        print("or update the MBOX_FILENAME variable in the script.")
+        return
+
+    print(f"Opening {mbox_path}...")
+    print("This may take a while depending on the size of your backup...")
+    
+    # Load the mbox file
+    try:
+        mbox = mailbox.mbox(mbox_path, create=False)
+    except Exception as e:
+        print(f"Failed to open mbox file: {e}")
+        return
+
+    # Dictionary to store data:
+    # Key: Domain (e.g., 'netflix.com')
+    # Value: {
+    #   'count': int, 
+    #   'names': Counter(), 
+    #   'sender_emails': set(), 
+    #   'my_emails': Counter() # Tracks which of your emails received mail from this domain
+    # }
+    services = defaultdict(lambda: {
+        'count': 0, 
+        'names': Counter(), 
+        'sender_emails': set(),
+        'my_emails': Counter()
+    })
+    
+    total_messages = len(mbox)
+    print(f"Found {total_messages} messages. Processing...")
+
+    for i, message in enumerate(mbox):
+        # Progress indicator every 1000 messages
+        if i % 1000 == 0:
+            sys.stdout.write(f"\rProcessing email {i}/{total_messages}")
+            sys.stdout.flush()
+
+        try:
+            # Get the 'From' header
+            from_header = message['from']
+            if not from_header:
+                continue
+
+            # Parse sender info
+            name, email_addr = email.utils.parseaddr(from_header)
+            if not email_addr:
+                continue
+
+            domain = get_domain(email_addr)
+
+            # Filtering logic
+            if not domain or domain in IGNORE_DOMAINS:
+                continue
+            if '.' not in domain:
+                continue
+
+            # Update sender stats
+            services[domain]['count'] += 1
+            services[domain]['sender_emails'].add(email_addr)
+            if name:
+                services[domain]['names'][name] += 1
+
+            # Update recipient stats (Which of my accounts did this go to?)
+            recipients = get_recipients(message)
+            for recipient in recipients:
+                services[domain]['my_emails'][recipient] += 1
+
+        except Exception as e:
+            continue
+
+    print(f"\n\nProcessing complete. Found {len(services)} unique domains.")
+    print(f"Writing results to {OUTPUT_CSV}...")
+
+    # Write to CSV
+    try:
+        with open(OUTPUT_CSV, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = [
+                'Service Domain', 
+                'Most Common Sender Name', 
+                'Email Count', 
+                'Sent To (My Accounts)', 
+                'Sample Sender Addresses'
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+
+            # Sort by count (descending)
+            sorted_services = sorted(services.items(), key=lambda item: item[1]['count'], reverse=True)
+
+            for domain, data in sorted_services:
+                # Most common sender name
+                most_common_name = data['names'].most_common(1)
+                display_name = most_common_name[0][0] if most_common_name else ""
+
+                # Identify which of your emails are used most for this service
+                # We limit to top 3 to keep the CSV clean, usually there's only 1 or 2
+                my_accounts = [email for email, _ in data['my_emails'].most_common(3)]
+                my_accounts_str = ", ".join(my_accounts)
+
+                # Sample sender emails
+                sample_sender_emails = ", ".join(list(data['sender_emails'])[:3])
+
+                writer.writerow({
+                    'Service Domain': domain,
+                    'Most Common Sender Name': display_name,
+                    'Email Count': data['count'],
+                    'Sent To (My Accounts)': my_accounts_str,
+                    'Sample Sender Addresses': sample_sender_emails
+                })
+
+        print("Done! Open the CSV file to see your services.")
+
+    except IOError as e:
+        print(f"Error writing CSV file: {e}")
+
+if __name__ == "__main__":
+    parse_mbox(MBOX_FILENAME)
