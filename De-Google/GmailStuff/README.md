@@ -1,3 +1,5 @@
+-----
+
 # Gmail Takeout Service Parser
 
 A simple Python script that analyzes your Google Takeout MBOX file to generate a list of every service, newsletter, or company that has ever emailed you.
